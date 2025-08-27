@@ -1,13 +1,14 @@
-#include "servers/STBlockingHTTPServer.hpp"
+#include "servers/MTBlockingHTTPServer.hpp"
 
-int main() {
-  STBlockingHTTPServer server(81, "/root/mcq/html");
+int main()
+{
+    MTBlockingHTTPServer server(8080, "/var/www/raduloff.dev", 8);
 
-  if (!server.start()) {
-    return -1;
-  }
+    if (!server.start()) {
+        return -1;
+    }
 
-  server.run();
+    server.run();
 
-  return 0;
+    return 0;
 }

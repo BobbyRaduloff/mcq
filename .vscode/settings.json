@@ -2,7 +2,8 @@
     "files.associations": {
         "iostream": "cpp",
         "socket.h": "c",
-        "stblockinghttpserver.hpp": "c"
+        "stblockinghttpserver.hpp": "c",
+        "condition_variable": "cpp"
     },
     "C_Cpp.default.compilerPath": "/usr/bin/g++"
 }

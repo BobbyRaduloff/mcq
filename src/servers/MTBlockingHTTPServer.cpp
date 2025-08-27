@@ -1,4 +1,4 @@
-#include "STBlockingHTTPServer.hpp"
+#include "MTBlockingHTTPServer.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -14,23 +14,67 @@
 #include <sstream>
 #include <string>
 
-STBlockingHTTPServer::STBlockingHTTPServer(int port, std::string html_path,
+MTBlockingHTTPServer::MTBlockingHTTPServer(int port, std::string html_path, int n_threads,
     int max_conn_queue)
     : port(port)
     , html_path(html_path)
+    , n_threads(n_threads)
+    , stop(false)
     , server_fd(-1)
     , max_conn_queue(max_conn_queue)
 {
+    for (int i = 0; i < n_threads; i++) {
+        workers.emplace_back([this] {
+            while (true) {
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(queue_mutex);
+                    // prevents spurious wakeup
+                    condition.wait(lock, [this] { return stop || !tasks.empty(); });
+
+                    if (stop && tasks.empty())
+                        return;
+
+                    task = std::move(tasks.front());
+                    tasks.pop();
+                }
+                task();
+            }
+        });
+    }
 }
 
-STBlockingHTTPServer::~STBlockingHTTPServer()
+MTBlockingHTTPServer::~MTBlockingHTTPServer()
 {
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        stop = true;
+    }
+
+    condition.notify_all();
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+
     if (server_fd != -1) {
         close(server_fd);
     }
 }
 
-std::string STBlockingHTTPServer::parse_http_path(const std::string& request)
+// i hate templates but this allows us to move the task without copy
+template <class F>
+void MTBlockingHTTPServer::enqueue_task(F&& f)
+{
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        if (stop)
+            throw std::runtime_error("enqueue on stopped ThreadPool");
+        tasks.emplace(std::forward<F>(f));
+    }
+    condition.notify_one();
+}
+
+std::string MTBlockingHTTPServer::parse_http_path(const std::string& request)
 {
     std::istringstream iss(request);
     std::string method, path, version;
@@ -39,7 +83,7 @@ std::string STBlockingHTTPServer::parse_http_path(const std::string& request)
     return path;
 }
 
-std::string STBlockingHTTPServer::get_content_type(const std::string& path)
+std::string MTBlockingHTTPServer::get_content_type(const std::string& path)
 {
     if (path.ends_with(".html") || path.ends_with(".htm")) {
         return "text/html";
@@ -60,7 +104,7 @@ std::string STBlockingHTTPServer::get_content_type(const std::string& path)
     return "text/plain";
 }
 
-void STBlockingHTTPServer::send_404(int client_fd)
+void MTBlockingHTTPServer::send_404(int client_fd)
 {
     std::string response = "HTTP/1.1 404 Not Found\r\n"
                            "Content-Type: text/html\r\n"
@@ -72,7 +116,7 @@ void STBlockingHTTPServer::send_404(int client_fd)
     send(client_fd, response.c_str(), response.length(), 0);
 }
 
-void STBlockingHTTPServer::send_500(int client_fd)
+void MTBlockingHTTPServer::send_500(int client_fd)
 {
     std::string response = "HTTP/1.1 500 Internal Server Error\r\n"
                            "Content-Type: text/html\r\n"
@@ -84,15 +128,13 @@ void STBlockingHTTPServer::send_500(int client_fd)
     send(client_fd, response.c_str(), response.length(), 0);
 }
 
-void STBlockingHTTPServer::serve_file(int client_fd, std::string& path)
+void MTBlockingHTTPServer::serve_file(int client_fd, std::string& path)
 {
-    char buffer[4096] = { 0 };
-
     std::string full_path = html_path + path;
 
     struct stat file_stat;
     if (stat(full_path.c_str(), &file_stat) != 0) {
-        std::cerr << "STBlockingHTTPServer: file not found: " << full_path
+        std::cerr << "MTBlockingHTTPServer: file not found: " << full_path
                   << std::endl;
         send_404(client_fd);
         return;
@@ -100,7 +142,7 @@ void STBlockingHTTPServer::serve_file(int client_fd, std::string& path)
 
     int fd = open(full_path.c_str(), O_RDONLY);
     if (fd < 0) {
-        std::cerr << "STBlockingHTTPServer: can't read " << full_path << std::endl;
+        std::cerr << "MTBlockingHTTPServer: can't read " << full_path << std::endl;
         send_500(client_fd);
         return;
     }
@@ -117,7 +159,7 @@ void STBlockingHTTPServer::serve_file(int client_fd, std::string& path)
     std::string headers = headers_stream.str();
     ssize_t headers_len = headers.size();
     if (send(client_fd, headers.c_str(), headers_len, 0) < 0) {
-        std::cerr << "STBlockingHTTPServer: couldn't send headers" << std::endl;
+        std::cerr << "MTBlockingHTTPServer: couldn't send headers" << std::endl;
         close(fd);
         return;
     }
@@ -138,7 +180,7 @@ void STBlockingHTTPServer::serve_file(int client_fd, std::string& path)
     close(fd);
 }
 
-void STBlockingHTTPServer::handle_client(int client_fd)
+void MTBlockingHTTPServer::handle_client(int client_fd)
 {
     char buffer[4096] = { 0 };
 
@@ -165,11 +207,11 @@ void STBlockingHTTPServer::handle_client(int client_fd)
     close(client_fd);
 }
 
-bool STBlockingHTTPServer::start()
+bool MTBlockingHTTPServer::start()
 {
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
-        std::cerr << "STBlockingHTTPServer: failed to create socket" << std::endl;
+        std::cerr << "MTBlockingHTTPServer: failed to create socket" << std::endl;
         return false;
     }
 
@@ -182,22 +224,22 @@ bool STBlockingHTTPServer::start()
     address.sin_port = htons(port);
 
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
-        std::cerr << "STBlockingHTTPServer: failed to bind to *:" << port
+        std::cerr << "MTBlockingHTTPServer: failed to bind to *:" << port
                   << std::endl;
         return false;
     }
 
     if (listen(server_fd, max_conn_queue) < 0) {
-        std::cerr << "STBlockingHTTPServer: failed to listen on *:" << port
+        std::cerr << "MTBlockingHTTPServer: failed to listen on *:" << port
                   << std::endl;
         return false;
     }
 
-    std::cout << "STBlockingHTTPServer: listening on *:" << port << std::endl;
+    std::cout << "MTBlockingHTTPServer: listening on *:" << port << std::endl;
     return true;
 }
 
-void STBlockingHTTPServer::run()
+void MTBlockingHTTPServer::run()
 {
     for (;;) {
         struct sockaddr_in client_addr;
@@ -205,11 +247,13 @@ void STBlockingHTTPServer::run()
 
         int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_add_len);
         if (client_fd < 0) {
-            std::cerr << "STBlockingHTTPServer: failed to accept client connection"
+            std::cerr << "MTBlockingHTTPServer: failed to accept client connection"
                       << std::endl;
             continue;
         }
 
-        handle_client(client_fd);
+        enqueue_task([this, client_fd] {
+            handle_client(client_fd);
+        });
     }
 }
