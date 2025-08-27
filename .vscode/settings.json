@@ -3,7 +3,8 @@
         "iostream": "cpp",
         "socket.h": "c",
         "stblockinghttpserver.hpp": "c",
-        "condition_variable": "cpp"
+        "condition_variable": "cpp",
+        "ostream": "cpp"
     },
     "C_Cpp.default.compilerPath": "/usr/bin/g++"
 }

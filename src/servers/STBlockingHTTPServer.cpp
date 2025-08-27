@@ -86,8 +86,6 @@ void STBlockingHTTPServer::send_500(int client_fd)
 
 void STBlockingHTTPServer::serve_file(int client_fd, std::string& path)
 {
-    char buffer[4096] = { 0 };
-
     std::string full_path = html_path + path;
 
     struct stat file_stat;
